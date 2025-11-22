@@ -6,7 +6,7 @@ project(fatfs-tool
 )
 
 if (WIN32)
-    add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
+    add_compile_definitions(_CRT_SECURE_NO_WARNINGS _TCHAR_DEFINED)
 endif()
 
 add_subdirectory(fatfs)

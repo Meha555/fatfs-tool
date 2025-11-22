@@ -1,9 +1,11 @@
+#include <getopt.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include "cmd.h"
 #include "ff.h"
+#include "fferrno.h"
 #ifdef _WIN32
 #include <direct.h>
 #endif
@@ -13,48 +15,159 @@ int shell_do_help(int argc, char **argv)
     (void)argc;
     (void)argv;
     printf("可用命令:\n");
-    printf("  ls [-p] <dir>                 - 列出当前目录内容\n");
-    printf("  cd <dir>                      - 切换目录\n");
-    printf("  pwd                           - 显示当前目录\n");
-    printf("  mkdir [-p] <dir1> <dir2> ...  - 创建目录\n");
-    printf("  rm <file>                     - 删除文件\n");
-    printf("  read <file> [bytes]           - 读取文件\n");
-    printf("  write <file> <data>           - 写入文件\n");
-    printf("  stat <path>                   - 检查文件/目录是否存在\n");
-    printf("  mv <old> <new>                - 重命名/移动文件或目录\n");
-    printf("  chmod <path> <attr>           - 更改文件/目录属性\n");
-    printf("  getfree [drive]               - 获取卷空闲空间\n");
-    printf("  getlabel <drive>              - 获取卷标\n");
-    printf("  setlabel <drive> <label>      - 设置卷标\n");
-    printf("  export <src> <dst>            - 导出文件/目录到宿主机\n");
-    printf("  clear                         - 清空屏幕\n");
-    printf("  help                          - 显示此帮助信息\n");
-    printf("  exit                          - 退出shell\n");
+    printf("  ls [-a -r] <dir>                       - 列出当前目录内容\n");
+    printf("  cd <dir>                               - 切换目录\n");
+    printf("  pwd                                    - 显示当前目录\n");
+    printf("  mkdir [-p] <dir1> <dir2> ...           - 创建目录\n");
+    printf("  rm [-r] <file1> [<file2> ...]          - 删除文件\n");
+    printf("  read <file> [bytes]                    - 读取文件\n");
+    printf("  write <file> <data>                    - 写入文件\n");
+    printf("  head <file> [-n lines]                 - 读取文件前n行\n");
+    printf("  truncate <file> [-p pos] [-s bytes]    - 从指定位置截断文件到指定大小\n");
+    printf("  stat <path>                            - 检查文件/目录是否存在\n");
+    printf("  mv <old> <new>                         - 重命名/移动文件或目录\n");
+    printf("  touch <file>                           - 创建文件或更新文件时间戳\n");
+    printf("  chmod +/-<attr> [...] <path>           - 更改文件/目录属性\n");
+    printf("  getfree [<drive>]                      - 获取卷空闲空间\n");
+    printf("  getlabel <drive>                       - 获取卷标\n");
+    printf("  setlabel <drive> <label>               - 设置卷标\n");
+    printf("  export <src> <dst>                     - 导出文件/目录到宿主机\n");
+    printf("  clear                                  - 清空屏幕\n");
+    printf("  help                                   - 显示此帮助信息\n");
+    printf("  exit                                   - 退出shell\n");
     return 0;
+}
+
+static void _print_tree(const TCHAR *path, int level, int show_hidden, int is_last[])
+{
+    DIR     dp;
+    FILINFO fno;
+    FRESULT fr;
+    int     entry_count   = 0;
+    int     current_entry = 0;
+
+    fr = f_opendir(&dp, path);
+    if (fr != FR_OK) {
+        fprintf(stderr, "无法打开目录: %s\n", path);
+        return;
+    }
+
+    // First pass: count entries
+    while (1) {
+        fr = f_readdir(&dp, &fno);
+        if (fr != FR_OK || fno.fname[0] == 0)
+            break;
+
+        /* 跳过当前目录和父目录项 */
+        if (strcmp(fno.fname, ".") == 0 || strcmp(fno.fname, "..") == 0)
+            continue;
+
+        // 跳过隐藏文件
+        if (!show_hidden && (fno.fattrib & AM_HID || fno.fname[0] == '.'))
+            continue;
+
+        entry_count++;
+    }
+
+    // Reset directory reading
+    f_rewinddir(&dp);
+    current_entry = 0;
+
+    while (1) {
+        fr = f_readdir(&dp, &fno);
+        if (fr != FR_OK || fno.fname[0] == 0)
+            break;
+
+        /* 跳过当前目录和父目录项 */
+        if (strcmp(fno.fname, ".") == 0 || strcmp(fno.fname, "..") == 0)
+            continue;
+
+        // 跳过隐藏文件
+        if (!show_hidden && (fno.fattrib & AM_HID || fno.fname[0] == '.'))
+            continue;
+
+        current_entry++;
+
+        // 打印缩进
+        for (int i = 0; i < level; i++) {
+            if (is_last[i])
+                // printf("    ");
+                printf("  ");
+            else
+                // printf("|   ");
+                printf("│ ");
+        }
+
+        // 打印树形连接符
+        int is_last_entry = (current_entry == entry_count);
+        if (is_last_entry)
+            // printf("`-- ");
+            printf("└─");
+        else
+            // printf("|-- ");
+            printf("├─");
+
+        if (fno.fattrib & AM_DIR) {
+            printf("%s/\n", fno.fname);
+            // 递归打印子目录
+            TCHAR full_path[256] = {0};
+            if (strcmp(path, ".") == 0) {
+                snprintf(full_path, sizeof(full_path), "%s", fno.fname);
+            } else {
+                snprintf(full_path, sizeof(full_path), "%s/%s", path, fno.fname);
+            }
+            is_last[level] = is_last_entry;
+            _print_tree(full_path, level + 1, show_hidden, is_last);
+        } else {
+            printf("%s\n", fno.fname);
+        }
+    }
+
+    f_closedir(&dp);
 }
 
 int shell_do_ls(int argc, char **argv)
 {
-    DIR     dir;
+    DIR     dp;
     FILINFO fno;
     FRESULT fr;
-    char   *path        = ".";
+    TCHAR  *path        = NULL;
     int     show_hidden = 0;
-    if (argc > 0) {
-        if (strcmp(argv[0], "-a") == 0) {
-            show_hidden = 1;
-            argc--;
-            argv++;
-        }
-        if (argc == 1) {
-            path = argv[argc - 1];
-        } else if (argc > 1) {
-            fprintf(stderr, "用法: ls [-a] [目录]\n");
-            return -1;
+    int     recursive   = 0;
+
+    for (int i = 0; i < argc; ++i) {
+        if (argv[i][0] == '-') {
+            for (int j = 1; argv[i][j] != '\0'; ++j) {
+                if (argv[i][j] == 'a') {
+                    show_hidden = 1;
+                } else if (argv[i][j] == 'r') {
+                    recursive = 1;
+                } else {
+                    fprintf(stderr, "未知选项: -%c, 用法: ls [-a -r] [目录]\n", argv[i][j]);
+                    return -1;
+                }
+            }
+        } else {
+            if (path) {
+                fprintf(stderr, "用法: ls [-a -r] [目录]\n");
+                return -1;
+            } else {
+                path = argv[i];
+            }
         }
     }
+    if (!path) {
+        path = ".";
+    }
 
-    fr = f_opendir(&dir, path);
+    if (recursive) {
+        printf("%s\n", path);
+        int is_last[256] = {0};  // Track if each level is the last entry
+        _print_tree(path, 0, show_hidden, is_last);
+        return 0;
+    }
+
+    fr = f_opendir(&dp, path);
     if (fr != FR_OK) {
         fprintf(stderr, "无法打开目录: %s\n", path);
         return -1;
@@ -66,7 +179,7 @@ int shell_do_ls(int argc, char **argv)
     unsigned long total_size = 0;
 
     while (1) {
-        fr = f_readdir(&dir, &fno);
+        fr = f_readdir(&dp, &fno);
         if (fr != FR_OK || fno.fname[0] == 0)
             break;
         /* 跳过当前目录和父目录项 */
@@ -104,7 +217,7 @@ int shell_do_ls(int argc, char **argv)
         entry_num++;
     }
 
-    f_closedir(&dir);
+    f_closedir(&dp);
 
     printf("%d 目录, %d 文件, 共 %lu 字节\n", dir_count, file_count, total_size);
 
@@ -113,18 +226,27 @@ int shell_do_ls(int argc, char **argv)
 
 int shell_do_mkdir(int argc, char **argv)
 {
-    int create_parent = 0;
     if (argc < 1) {
         fprintf(stderr, "用法: mkdir [-p] <目录1> <目录2> ...\n");
         return -1;
     }
-    if (strcmp(argv[0], "-p") == 0) {
-        create_parent = 1;
-        argc--;
-        argv++;
+
+    int create_parent = 0;
+    for (int i = 0; i < argc; ++i) {
+        if (argv[i][0] == '-') {
+            for (int j = 1; argv[i][j] != '\0'; ++j) {
+                if (argv[i][j] == 'p') {
+                    create_parent = 1;
+                } else {
+                    fprintf(stderr, "未知选项: -%c, 用法: mkdir [-p] <目录1> <目录2> ...\n",
+                            argv[i][j]);
+                    return -1;
+                }
+            }
+        }
     }
 
-    char cwd[256] = {0};
+    TCHAR cwd[256] = {0};
     if (create_parent) {
         FRESULT fr = f_getcwd(cwd, sizeof(cwd));
         if (fr != FR_OK) {
@@ -133,11 +255,13 @@ int shell_do_mkdir(int argc, char **argv)
     }
 
     for (int i = 0; i < argc; i++) {
+        if (strcmp(argv[i], "-p") == 0)
+            continue;
         FRESULT fr = FR_OK;
         if (!create_parent) {
             fr = f_mkdir(argv[i]);
         } else {
-            char *dir = strtok(argv[i], "/");
+            TCHAR *dir = strtok(argv[i], "/");
             while (dir) {
                 fr = f_mkdir(dir);
                 if (fr != FR_OK && fr != FR_EXIST) {
@@ -155,7 +279,7 @@ int shell_do_mkdir(int argc, char **argv)
             }
         }
         if (fr != FR_OK && fr != FR_EXIST) {
-            fprintf(stderr, "创建目录失败: %s (错误代码: %d)\n", argv[i], fr);
+            fprintf(stderr, "创建目录失败: %s (%s: %d)\n", argv[i], f_strerror(fr), fr);
             return -1;
         }
     }
@@ -163,17 +287,85 @@ int shell_do_mkdir(int argc, char **argv)
     return 0;
 }
 
+static FRESULT _do_unlink(const TCHAR *path, int recursive)
+{
+    FRESULT fr = FR_OK;
+
+    FILINFO fno;
+    fr = f_stat(path, &fno);
+    if (fr != FR_OK) {
+        return fr;
+    }
+
+    if ((fno.fattrib & AM_DIR) && recursive) {
+        DIR dp;
+        fr = f_opendir(&dp, path);
+        if (fr != FR_OK) {
+            return fr;
+        }
+        int is_empty = 1;
+        while (1) {
+            fr = f_readdir(&dp, &fno);
+            if (fr != FR_OK || fno.fname[0] == 0) {
+                is_empty = 1;  // 已经删完了所有子目录，原本非空的目录就变成空目录了
+                break;
+            }
+            is_empty = 0;
+
+            // 跳过当前目录和父目录项
+            if (strcmp(fno.fname, ".") == 0 || strcmp(fno.fname, "..") == 0)
+                continue;
+
+            TCHAR  relpath[256] = {0};
+            size_t len          = strlen(path);
+            strncpy(relpath, path, len);
+            relpath[len] = '/';
+            fr           = _do_unlink(strcat(relpath, fno.fname), recursive);
+            if (fr != FR_OK) {
+                break;
+            }
+        }
+        f_closedir(&dp);
+        if (is_empty) {
+            fr = f_unlink(path);
+        }
+    } else {
+        fr = f_unlink(path);
+    }
+
+    return fr;
+}
+
 int shell_do_rm(int argc, char **argv)
 {
-    if (argc != 1) {
-        fprintf(stderr, "用法: rm <文件名>\n");
+    if (argc < 1) {
+        fprintf(stderr, "用法: rm [-r] <file1> [<file2> ...]\n");
         return -1;
     }
 
-    FRESULT fr = f_unlink(argv[0]);
-    if (fr != FR_OK) {
-        fprintf(stderr, "删除文件/目录失败: %s (错误代码: %d)\n", argv[0], fr);
-        return -1;
+    int recursive = 0;
+    for (int i = 0; i < argc; ++i) {
+        if (argv[i][0] == '-') {
+            for (int j = 1; argv[i][j] != '\0'; ++j) {
+                if (argv[i][j] == 'r') {
+                    recursive = 1;
+                } else {
+                    fprintf(stderr, "未知选项: -%c, 用法: rm [-r] <file1> [<file2> ...]\n",
+                            argv[i][j]);
+                    return -1;
+                }
+            }
+        }
+    }
+
+    for (int i = 0; i < argc; ++i) {
+        if (strcmp(argv[i], "-r") != 0) {
+            FRESULT fr = _do_unlink(argv[i], recursive);
+            if (fr != FR_OK) {
+                fprintf(stderr, "删除文件/目录失败: %s (%s: %d)\n", argv[0], f_strerror(fr), fr);
+                return -1;
+            }
+        }
     }
 
     return 0;
@@ -188,7 +380,7 @@ int shell_do_cd(int argc, char **argv)
 
     FRESULT fr = f_chdir(argv[0]);
     if (fr != FR_OK) {
-        fprintf(stderr, "切换目录失败: %s (错误代码: %d)\n", argv[0], fr);
+        fprintf(stderr, "切换目录失败: %s (%s: %d)\n", argv[0], f_strerror(fr), fr);
         return -1;
     }
 
@@ -209,10 +401,10 @@ int shell_do_pwd(int argc, char **argv)
         return -1;
     }
 
-    char    cwd[256] = {0};
+    TCHAR   cwd[256] = {0};
     FRESULT fr       = f_getcwd(cwd, sizeof(cwd));
     if (fr != FR_OK) {
-        fprintf(stderr, "获取当前目录失败 (错误代码: %d)\n", fr);
+        fprintf(stderr, "获取当前目录失败 (%s: %d)\n", f_strerror(fr), fr);
         return -1;
     }
 
@@ -234,7 +426,7 @@ int shell_do_touch(int argc, char **argv)
 
     FRESULT fr = f_open(fp, argv[0], FA_CREATE_NEW | FA_WRITE);
     if (fr != FR_OK && fr != FR_EXIST) {
-        fprintf(stderr, "创建文件失败: %s (错误代码: %d)\n", argv[0], fr);
+        fprintf(stderr, "创建文件失败: %s (%s: %d)\n", argv[0], f_strerror(fr), fr);
         free(fp);
         return -1;
     } else if (fr == FR_EXIST) {
@@ -260,9 +452,10 @@ int shell_do_mv(int argc, char **argv)
         return -1;
     }
 
-    FRESULT res = f_rename(argv[0], argv[1]);
-    if (res != FR_OK) {
-        fprintf(stderr, "重命名/移动文件失败: %s -> %s\n", argv[0], argv[1]);
+    FRESULT fr = f_rename(argv[0], argv[1]);
+    if (fr != FR_OK) {
+        fprintf(stderr, "重命名/移动文件失败: %s -> %s (%s: %d)\n", argv[0], argv[1],
+                f_strerror(fr), fr);
         return -1;
     }
 
@@ -277,42 +470,42 @@ int shell_do_read(int argc, char **argv)
         return -1;
     }
 
-    const char *filename      = argv[0];
-    UINT        bytes_to_read = 0;
-    int         read_all      = (argc == 1);  // 如果没有提供字节数参数，则读取整个文件
+    const TCHAR *filename      = argv[0];
+    UINT         bytes_to_read = 0;
+    int          read_all      = (argc == 1);  // 如果没有提供字节数参数，则读取整个文件
 
-    FIL     fil;
-    FRESULT fr = f_open(&fil, filename, FA_READ);
+    FIL     fp;
+    FRESULT fr = f_open(&fp, filename, FA_READ);
     if (fr != FR_OK) {
-        fprintf(stderr, "打开文件失败: %s (错误代码: %d)\n", filename, fr);
+        fprintf(stderr, "打开文件失败: %s (%s: %d)\n", filename, f_strerror(fr), fr);
         return -1;
     }
 
     // 如果没有提供字节数参数，则读取整个文件
     if (read_all) {
-        bytes_to_read = (UINT)fil.obj.objsize;  // 获取文件大小
+        bytes_to_read = (UINT)fp.obj.objsize;  // 获取文件大小
         if (bytes_to_read == 0) {
             printf("文件为空\n");
-            f_close(&fil);
+            f_close(&fp);
             return 0;
         }
     } else {
         bytes_to_read = (UINT)atoi(argv[1]);
     }
 
-    void *buffer = malloc(bytes_to_read);
-    if (!buffer) {
+    void *buff = malloc(bytes_to_read);
+    if (!buff) {
         fprintf(stderr, "内存分配失败\n");
-        f_close(&fil);
+        f_close(&fp);
         return -1;
     }
 
     UINT bytes_read;
-    fr = f_read(&fil, buffer, bytes_to_read, &bytes_read);
+    fr = f_read(&fp, buff, bytes_to_read, &bytes_read);
     if (fr != FR_OK) {
-        fprintf(stderr, "读取文件失败: %s (错误代码: %d)\n", filename, fr);
-        free(buffer);
-        f_close(&fil);
+        fprintf(stderr, "读取文件失败: %s (%s: %d)\n", filename, f_strerror(fr), fr);
+        free(buff);
+        f_close(&fp);
         return -1;
     }
 
@@ -321,12 +514,13 @@ int shell_do_read(int argc, char **argv)
     for (UINT i = 0; i < bytes_read; i++) {
         if (i % 16 == 0)
             printf("\n%04X: ", i);
-        printf("%02X ", ((unsigned char *)buffer)[i]);
+        printf("%02X ", ((unsigned char *)buff)[i]);
     }
     printf("\n");
 
-    free(buffer);
-    f_close(&fil);
+    free(buff);
+
+    f_close(&fp);
     return 0;
 }
 
@@ -337,17 +531,17 @@ int shell_do_write(int argc, char **argv)
         return -1;
     }
 
-    const char *filename = argv[0];
+    const TCHAR *filename = argv[0];
     // 将所有剩余的参数连接成一个字符串作为数据
-    char data[256] = {0};
-    int  data_len  = 0;
+    TCHAR  data[256] = {0};
+    size_t data_len  = 0;
 
     for (int i = 1; i < argc; i++) {
         if (i > 1) {
             // 在参数之间添加空格
             data[data_len++] = ' ';
         }
-        int arg_len = strlen(argv[i]);
+        size_t arg_len = strlen(argv[i]);
         if (data_len + arg_len < sizeof(data) - 1) {
             strcpy(data + data_len, argv[i]);
             data_len += arg_len;
@@ -360,32 +554,261 @@ int shell_do_write(int argc, char **argv)
         }
     }
 
-    FIL     fil;
-    FRESULT fr = f_open(&fil, filename, FA_WRITE | FA_OPEN_ALWAYS);
+    FIL     fp;
+    FRESULT fr = f_open(&fp, filename, FA_WRITE | FA_OPEN_ALWAYS);
     if (fr != FR_OK) {
-        fprintf(stderr, "打开文件失败: %s (错误代码: %d)\n", filename, fr);
+        fprintf(stderr, "打开文件失败: %s (%s: %d)\n", filename, f_strerror(fr), fr);
         return -1;
     }
 
     // 移动到文件末尾
-    fr = f_lseek(&fil, f_size(&fil));
+    fr = f_lseek(&fp, f_size(&fp));
     if (fr != FR_OK) {
-        fprintf(stderr, "定位文件指针失败 (错误代码: %d)\n", fr);
-        f_close(&fil);
+        fprintf(stderr, "定位文件指针失败 (%s: %d)\n", f_strerror(fr), fr);
+        f_close(&fp);
         return -1;
     }
 
     UINT bytes_written;
-    fr = f_write(&fil, data, data_len, &bytes_written);
+    fr = f_write(&fp, data, (UINT)data_len, &bytes_written);
     if (fr != FR_OK) {
-        fprintf(stderr, "写入文件失败: %s (错误代码: %d)\n", filename, fr);
-        f_close(&fil);
+        fprintf(stderr, "写入文件失败: %s (%s: %d)\n", filename, f_strerror(fr), fr);
+        f_close(&fp);
         return -1;
     }
 
     printf("附加了 %u 字节的数据到文件: %s\n", bytes_written, filename);
 
-    f_close(&fil);
+    f_close(&fp);
+    return 0;
+}
+
+int shell_do_head(int argc, char **argv)
+{
+    int          nlines   = 10;  // 默认10行
+    int          found_n  = 0;
+    const TCHAR *filename = NULL;
+
+    if (argc < 1 || argc > 3) {
+        fprintf(stderr, "用法: head <file> [-n lines]\n");
+        return -1;
+    }
+
+    for (int i = 0; i < argc; ++i) {
+        if (argv[i][0] == '-') {
+            for (int j = 1; argv[i][j] != '\0'; ++j) {
+                if (argv[i][j] == 'n') {
+                    nlines = atoi(argv[i + 1]);
+                    if (nlines == 0) {
+                        fprintf(stderr, "lines must be a positive number\n");
+                        return -1;
+                    }
+                    found_n = 1;
+                    if (argc == 3) {
+                        filename = argv[i == 0 ? 2 : 0];
+                    }
+                } else {
+                    fprintf(stderr, "未知选项: -%c, 用法: head <file> [-n lines]\n", argv[i][1]);
+                    return -1;
+                }
+            }
+        }
+    }
+
+    // for (int i = 0; i < argc - 1; ++i) {
+    //     if (strcmp(argv[i], "-n") == 0) {
+    //         nlines = atoi(argv[i + 1]);
+    //         if (nlines == 0) {
+    //             fprintf(stderr, "lines must be a positive number\n");
+    //             return -1;
+    //         }
+    //         found_n = 1;
+    //         if (argc == 3) {
+    //             filename = argv[i == 0 ? 2 : 0];
+    //         }
+    //         break;
+    //     }
+    // }
+    if ((found_n == 0 && argc != 1) || (found_n == 1 && argc != 3)) {
+        fprintf(stderr, "用法: head <file> [-n lines]\n");
+        return -1;
+    }
+    if (found_n == 0 && argc == 1) {
+        filename = argv[0];
+    }
+
+    FIL     fp;
+    FRESULT fr = f_open(&fp, filename, FA_OPEN_EXISTING | FA_READ);
+    if (fr != FR_OK) {
+        fprintf(stderr, "打开文件失败: %s (%s: %d)\n", filename, f_strerror(fr), fr);
+        return -1;
+    }
+
+    FILINFO fno;
+    fr = f_stat(filename, &fno);
+    if (fr != FR_OK) {
+        fprintf(stderr, "获取文件信息失败: %s (%s: %d)\n", filename, f_strerror(fr), fr);
+        f_close(&fp);
+        return -1;
+    }
+
+    if (fno.fattrib & AM_DIR) {
+        fprintf(stderr, "%s 是一个目录\n", filename);
+        f_close(&fp);
+        return -1;
+    }
+
+    TCHAR *buff = (TCHAR *)calloc(1, fno.fsize);
+    if (!buff) {
+        fprintf(stderr, "内存不足，无法读取 %s 内容\n", filename);
+        f_close(&fp);
+        return -1;
+    }
+
+    while (nlines--) {
+        if (!f_gets(buff, fno.fsize - 1, &fp)) {
+            if (f_eof(&fp)) {
+                break;
+            }
+            fprintf(stderr, "读取 %s 失败 (%s: %d)\n", filename, f_strerror(fr), f_error(&fp));
+            free(buff);
+            f_close(&fp);
+            return -1;
+        }
+        printf("%s\n", buff);
+    }
+
+    free(buff);
+    f_close(&fp);
+    return 0;
+}
+
+int shell_do_truncate(int argc, char **argv)
+{
+    int          nbytes       = -1;
+    int          found_nbytes = 0;
+    int          pos          = 0;
+    int          found_pos    = 0;
+    const TCHAR *filename     = NULL;
+
+    for (int i = 0; i < argc; i++) {
+        if (argv[i][0] == '-') {
+            for (int j = 1; argv[i][j] != '\0'; ++j) {
+                if (argv[i][j] == 's') {
+                    if (j + 1 >= argc || argv[i][j + 1] != '\0') {
+                        fprintf(stderr, "-s 需要参数。用法: truncate <file> [-s bytes] [-p pos]\n");
+                        return -1;
+                    }
+                    nbytes = atoi(argv[i + 1]);
+                    if (nbytes < 0) {
+                        fprintf(stderr, "bytes must bigger than 0.\n");
+                        return -1;
+                    }
+                    found_nbytes = 1;
+                    i++;
+                    break;
+                } else if (argv[i][j] == 'p') {
+                    pos = atoi(argv[i + 1]);
+                    if (pos < 0) {
+                        if (j + 1 >= argc || argv[i][j + 1] != '\0') {
+                            fprintf(stderr,
+                                    "-p 需要参数。用法: truncate <file> [-s bytes] [-p pos]\n");
+                            return -1;
+                        }
+                        fprintf(stderr, "pos must bigger than 0.\n");
+                        return -1;
+                    }
+                    found_pos = 1;
+                    i++;
+                    break;
+                } else {
+                    fprintf(stderr, "未知选项: -%c, 用法: truncate <file> [-s bytes] [-p pos]\n",
+                            argv[i][1]);
+                    return -1;
+                }
+            }
+        } else {
+            if (filename) {
+                fprintf(stderr, "用法: truncate <file> [-s bytes] [-p pos]\n");
+                return -1;
+            }
+            filename = argv[i];
+        }
+
+        // if (strcmp(argv[i], "-s") == 0 && i + 1 < argc) {
+        //     nbytes = atoi(argv[i + 1]);
+        //     if (nbytes < 0) {
+        //         fprintf(stderr, "bytes must bigger than 0.\n");
+        //         return -1;
+        //     }
+        //     found_nbytes = 1;
+        //     i++;  // 跳过参数值
+        // } else if (strcmp(argv[i], "-p") == 0 && i + 1 < argc) {
+        //     pos = atoi(argv[i + 1]);
+        //     if (pos < 0) {
+        //         fprintf(stderr, "pos must bigger than 0.\n");
+        //         return -1;
+        //     }
+        //     found_pos = 1;
+        //     i++;  // 跳过参数值
+        // } else if (filename == NULL) {
+        //     // 第一个非选项参数作为文件名
+        //     filename = argv[i];
+        // } else {
+        //     fprintf(stderr, "用法: truncate <file> [-s bytes] [-p pos]\n");
+        //     return -1;
+        // }
+    }
+
+    if (filename == NULL) {
+        fprintf(stderr, "用法: truncate <file> [-s bytes] [-p pos]\n");
+        return -1;
+    }
+
+    FIL     fp;
+    FRESULT fr = f_open(&fp, filename, FA_OPEN_EXISTING | FA_WRITE);
+    if (fr != FR_OK) {
+        fprintf(stderr, "打开文件失败: %s (%s: %d)\n", filename, f_strerror(fr), fr);
+        return -1;
+    }
+
+    // 如果指定了位置，则移动文件指针到该位置
+    if (found_pos) {
+        fr = f_lseek(&fp, pos);
+        if (fr != FR_OK) {
+            fprintf(stderr, "定位文件指针失败: %s (%s: %d)\n", filename, f_strerror(fr), fr);
+            f_close(&fp);
+            return -1;
+        }
+    }
+
+    // 如果指定了大小，则调整文件大小
+    if (found_nbytes) {
+        // 先扩展文件到指定大小（如果需要）
+        fr = f_lseek(&fp, pos + nbytes);
+        if (fr != FR_OK) {
+            fprintf(stderr, "定位文件指针失败: %s (%s: %d)\n", filename, f_strerror(fr), fr);
+            f_close(&fp);
+            return -1;
+        }
+
+        // f_expend 只能对大小为0B的文件进行扩容
+        // fr = f_expand(&fp, nbytes, 1);
+        // if (fr != FR_OK) {
+        //     fprintf(stderr, "扩展文件失败: %s (%s: %d)\n", filename, fr);
+        //     f_close(&fp);
+        //     return -1;
+        // }
+    }
+
+    fr = f_truncate(&fp);
+    if (fr != FR_OK) {
+        fprintf(stderr, "截断文件失败: %s (%s: %d)\n", filename, f_strerror(fr), fr);
+        f_close(&fp);
+        return -1;
+    }
+
+    f_close(&fp);
     return 0;
 }
 
@@ -397,9 +820,9 @@ int shell_do_stat(int argc, char **argv)
     }
 
     FILINFO fno;
-    FRESULT res = f_stat(argv[0], &fno);
-    if (res != FR_OK) {
-        fprintf(stderr, "获取文件/目录信息失败: %s\n", argv[0]);
+    FRESULT fr = f_stat(argv[0], &fno);
+    if (fr != FR_OK) {
+        fprintf(stderr, "获取文件/目录信息失败: %s (%s: %d)\n", argv[0], f_strerror(fr), fr);
         return -1;
     }
 
@@ -411,16 +834,9 @@ int shell_do_stat(int argc, char **argv)
     // 其他文件属性
     if (fno.fattrib & AM_RDO || fno.fattrib & AM_HID || fno.fattrib & AM_SYS ||
         fno.fattrib & AM_ARC) {
-        printf("%8s: ", "Attri");
-        if (fno.fattrib & AM_RDO)
-            printf("R");
-        if (fno.fattrib & AM_HID)
-            printf("H");
-        if (fno.fattrib & AM_SYS)
-            printf("S");
-        if (fno.fattrib & AM_ARC)
-            printf("A");
-        printf("\n");
+        printf("%8s: %c%c%c%c\n", "Attri", fno.fattrib & AM_RDO ? 'R' : '-',
+               fno.fattrib & AM_HID ? 'H' : '-', fno.fattrib & AM_SYS ? 'S' : '-',
+               fno.fattrib & AM_ARC ? 'A' : '-');
     }
     // 如果是文件，显示大小（目录的fsize没有被赋值）
     if (!(fno.fattrib & AM_DIR)) {
@@ -440,29 +856,84 @@ int shell_do_stat(int argc, char **argv)
     return 0;
 }
 
+static int _deal_with_attributes(BYTE *attr, const char *attributes, size_t attributes_len,
+                                 char opt)
+{
+    if (!attr || !attributes) {
+        return 0;
+    }
+#define _ADD_ATTRIBUTE(origin, attr) origin |= (attr)
+#define _REMOVE_ATTRIBUTE(origin, attr) origin &= ~(attr)
+    BYTE attribute = 0;
+    for (int i = 0; i < attributes_len; ++i) {
+        switch (attributes[i]) {
+            case 'R':
+                if (opt == '+')
+                    _ADD_ATTRIBUTE(attribute, AM_RDO);
+                else
+                    _REMOVE_ATTRIBUTE(*attr, AM_RDO);
+                break;
+            case 'H':
+                if (opt == '+')
+                    _ADD_ATTRIBUTE(attribute, AM_HID);
+                else
+                    _REMOVE_ATTRIBUTE(*attr, AM_HID);
+                break;
+            case 'S':
+                if (opt == '+')
+                    _ADD_ATTRIBUTE(attribute, AM_SYS);
+                else
+                    _REMOVE_ATTRIBUTE(*attr, AM_SYS);
+                break;
+            case 'A':
+                if (opt == '+')
+                    _ADD_ATTRIBUTE(attribute, AM_ARC);
+                else
+                    _REMOVE_ATTRIBUTE(*attr, AM_ARC);
+                break;
+            default:
+                fprintf(stderr, "无效的属性: %c\n", attributes[i]);
+                return -1;
+        }
+    }
+#undef _ADD_ATTRIBUTE
+#undef _REMOVE_ATTRIBUTE
+    *attr |= attribute;
+    return 0;
+}
+
 int shell_do_chmod(int argc, char **argv)
 {
     if (argc < 2) {
-        fprintf(stderr, "用法: chmod <path> <attr>\n");
+        fprintf(stderr, "用法: chmod +/-<attr> [...] <path>\n");
         return -1;
     }
 
-    // 解析属性参数
-    BYTE attr = 0;
-    if (strstr(argv[1], "R"))
-        attr |= AM_RDO;
-    if (strstr(argv[1], "H"))
-        attr |= AM_HID;
-    if (strstr(argv[1], "S"))
-        attr |= AM_SYS;
-
-    FRESULT res = f_chmod(argv[0], attr, AM_RDO | AM_HID | AM_SYS);
-    if (res != FR_OK) {
-        fprintf(stderr, "更改属性失败: %s\n", argv[0]);
-        return -1;
+    BYTE         attr = 0, mask = 0;
+    const TCHAR *filename = NULL;
+    for (int i = 0; i < argc; ++i) {
+        if (argv[i][0] == '+' || argv[i][0] == '-') {
+            size_t attributes_len = strlen(argv[i]);
+            if (attributes_len == 1) {
+                fprintf(stderr, "用法: chmod +/-<attr> [...] <path>\n");
+                return -1;
+            }
+            _deal_with_attributes(&attr, argv[i] + 1, attributes_len - 1, argv[i][0]);
+            _deal_with_attributes(&mask, argv[i] + 1, attributes_len - 1, '+');
+        } else {
+            if (filename) {
+                fprintf(stderr, "用法: chmod +/-<attr> [...] <path>\n");
+                return -1;
+            }
+            filename = argv[i];
+        }
     }
 
-    printf("成功更改属性: %s\n", argv[0]);
+    FRESULT fr = f_chmod(filename, attr, mask);
+    if (fr != FR_OK) {
+        fprintf(stderr, "更改属性失败: %s (%s: %d)\n", filename, f_strerror(fr), fr);
+        return -1;
+    }
     return 0;
 }
 
@@ -522,26 +993,31 @@ int shell_do_getfree(int argc, char **argv)
     DWORD  fre_clust, fre_sect, tot_sect;
     FATFS *fs;
 
+    if (argc > 1) {
+        fprintf(stderr, "用法: getfree [<drive>]\n");
+        return -1;
+    }
+
     // 如果没有参数，则显示所有可能驱动器的信息
-    if (argc < 1) {
+    if (argc == 0) {
         printf("驱动器列表 (最大支持 %d 个驱动器):\n", FF_VOLUMES);
 
         int mounted_count = 0;
         // 遍历所有可能的驱动器（根据FF_VOLUMES配置）
         for (int i = 0; i < FF_VOLUMES; i++) {
             // 构造驱动器路径
-            char drive_path[4] = {0};
+            TCHAR driver_path[4] = {0};
             if (FF_STR_VOLUME_ID == 0) {
-                drive_path[0] = '0' + i;  // 数字驱动器号
+                driver_path[0] = '0' + i;  // 数字驱动器号
+                driver_path[1] = ':';
             }
 
             // 尝试获取驱动器的空闲空间信息
-            FRESULT res = f_getfree(drive_path, &fre_clust, &fs);
-            if (res == FR_OK) {
+            FRESULT fr = f_getfree(driver_path, &fre_clust, &fs);
+            if (fr == FR_OK) {
                 mounted_count++;
-                // 计算扇区数量
-                tot_sect = (fs->n_fatent - 2) * fs->csize;
-                fre_sect = fre_clust * fs->csize;
+                tot_sect = (fs->n_fatent - 2) * fs->csize;  // 总扇区数
+                fre_sect = fre_clust * fs->csize;           // 空闲扇区数
 
                 printf("  驱动器 %d:\n", i);
                 printf("    总扇区数: %lu\n", (unsigned long)tot_sect);
@@ -566,10 +1042,8 @@ int shell_do_getfree(int argc, char **argv)
                         break;
                 }
                 printf("\n");
-            } else if (res == FR_INVALID_DRIVE) {
-                printf("  驱动器 %d: 未挂载或无效\n", i);
             } else {
-                printf("  驱动器 %d: 获取信息失败 (错误码: %d)\n", i, res);
+                printf("  驱动器 %d: 获取信息失败 (%s: %d)\n", i, f_strerror(fr), fr);
             }
         }
 
@@ -581,15 +1055,18 @@ int shell_do_getfree(int argc, char **argv)
     }
 
     // 如果提供了驱动器参数，则显示指定驱动器的信息
-    FRESULT res = f_getfree(argv[0], &fre_clust, &fs);
-    if (res != FR_OK) {
-        fprintf(stderr, "获取空闲空间失败: %s (错误码: %d)\n", argv[0], res);
+    FRESULT fr = f_getfree(argv[0], &fre_clust, &fs);
+    if (fr != FR_OK) {
+        if (fr == FR_INVALID_DRIVE) {
+            printf("驱动器 %s 不存在\n", argv[0]);
+        } else {
+            fprintf(stderr, "获取空闲空间失败: %s (%s: %d)\n", argv[0], f_strerror(fr), fr);
+        }
         return -1;
     }
 
-    // 计算扇区数量
-    tot_sect = (fs->n_fatent - 2) * fs->csize;
-    fre_sect = fre_clust * fs->csize;
+    tot_sect = (fs->n_fatent - 2) * fs->csize;  // 总扇区数
+    fre_sect = fre_clust * fs->csize;           // 空闲扇区数
 
     printf("驱动器 %s 的空闲空间:\n", argv[0]);
     printf("  总扇区数: %lu\n", (unsigned long)tot_sect);
@@ -601,12 +1078,12 @@ int shell_do_getfree(int argc, char **argv)
 
 int shell_do_getlabel(int argc, char **argv)
 {
-    if (argc < 1) {
+    if (argc != 1) {
         fprintf(stderr, "用法: getlabel <驱动器>\n");
         return -1;
     }
 
-    char  label[12];
+    TCHAR label[12];
     DWORD vsn;
 
     FRESULT res = f_getlabel(argv[0], label, &vsn);
@@ -623,7 +1100,7 @@ int shell_do_getlabel(int argc, char **argv)
 
 int shell_do_setlabel(int argc, char **argv)
 {
-    if (argc < 2) {
+    if (argc != 2) {
         fprintf(stderr, "用法: setlabel <驱动器> <卷标>\n");
         return -1;
     }
@@ -639,18 +1116,18 @@ int shell_do_setlabel(int argc, char **argv)
 
 int shell_do_export(int argc, char **argv)
 {
-    if (argc < 2) {
+    if (argc != 2) {
         fprintf(stderr, "用法: export <源路径> <目标路径>\n");
         return -1;
     }
 
-    const char *src_path = argv[0];  // 文件系统中的源路径
-    const char *dst_path = argv[1];  // 宿主机文件系统的目标路径
+    const TCHAR *src_path = argv[0];  // 文件系统中的源路径
+    const TCHAR *dst_path = argv[1];  // 宿主机文件系统的目标路径
 
     // 检查源路径是否存在
     FILINFO fno;
-    FRESULT res = f_stat(src_path, &fno);
-    if (res != FR_OK) {
+    FRESULT fr = f_stat(src_path, &fno);
+    if (fr != FR_OK) {
         fprintf(stderr, "源路径不存在: %s\n", src_path);
         return -1;
     }
@@ -665,17 +1142,17 @@ int shell_do_export(int argc, char **argv)
 #endif
 
         // 打开目录
-        DIR dir;
-        res = f_opendir(&dir, src_path);
-        if (res != FR_OK) {
+        DIR dp;
+        fr = f_opendir(&dp, src_path);
+        if (fr != FR_OK) {
             fprintf(stderr, "无法打开目录: %s\n", src_path);
             return -1;
         }
 
         // 遍历目录中的所有文件和子目录
         while (1) {
-            res = f_readdir(&dir, &fno);
-            if (res != FR_OK || fno.fname[0] == 0)
+            fr = f_readdir(&dp, &fno);
+            if (fr != FR_OK || fno.fname[0] == 0)
                 break;
 
             // 跳过当前目录和父目录项
@@ -683,8 +1160,8 @@ int shell_do_export(int argc, char **argv)
                 continue;
 
             // 构造源路径和目标路径
-            char full_src_path[256];
-            char full_dst_path[256];
+            TCHAR full_src_path[256];
+            TCHAR full_dst_path[256];
 
             if (strcmp(src_path, "/") == 0) {
                 snprintf(full_src_path, sizeof(full_src_path), "/%s", fno.fname);
@@ -699,15 +1176,15 @@ int shell_do_export(int argc, char **argv)
             shell_do_export(2, sub_argv);
         }
 
-        f_closedir(&dir);
+        f_closedir(&dp);
     } else {
         // 如果是文件，复制文件内容
         FIL   src_file;
         FILE *dst_file;
 
         // 打开源文件（FAT文件系统中的文件）
-        res = f_open(&src_file, src_path, FA_READ);
-        if (res != FR_OK) {
+        fr = f_open(&src_file, src_path, FA_READ);
+        if (fr != FR_OK) {
             fprintf(stderr, "无法打开源文件: %s\n", src_path);
             return -1;
         }
@@ -721,16 +1198,16 @@ int shell_do_export(int argc, char **argv)
         }
 
         // 复制文件内容
-        char   buffer[1024];
+        TCHAR  buff[1024];  // 每次拷贝1024字节
         UINT   bytes_read;
         size_t bytes_written;
 
         while (1) {
-            res = f_read(&src_file, buffer, sizeof(buffer), &bytes_read);
-            if (res != FR_OK || bytes_read == 0)
+            fr = f_read(&src_file, buff, sizeof(buff), &bytes_read);
+            if (fr != FR_OK || bytes_read == 0)
                 break;
 
-            bytes_written = fwrite(buffer, 1, bytes_read, dst_file);
+            bytes_written = fwrite(buff, 1, bytes_read, dst_file);
             if (bytes_written != bytes_read) {
                 fprintf(stderr, "写入目标文件时出错: %s\n", dst_path);
                 f_close(&src_file);
@@ -891,6 +1368,10 @@ int shell_run(void)
             ret = shell_do_read(argc - 1, argv + 1);
         } else if (_shell_cmd0_is(write)) {
             ret = shell_do_write(argc - 1, argv + 1);
+        } else if (_shell_cmd0_is(head)) {
+            ret = shell_do_head(argc - 1, argv + 1);
+        } else if (_shell_cmd0_is(truncate)) {
+            ret = shell_do_truncate(argc - 1, argv + 1);
         } else if (_shell_cmd0_is(stat)) {
             ret = shell_do_stat(argc - 1, argv + 1);
         } else if (_shell_cmd0_is(mv)) {

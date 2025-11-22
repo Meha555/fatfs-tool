@@ -30,22 +30,6 @@ typedef struct cmd_t {
         }                                                                                          \
     } while (0)
 
-typedef struct create_cmd_args_t {
-    char     *img_name;
-    size_t    img_size;
-    MKFS_PARM mkfs_parm;
-} create_cmd_args_t;
-
-typedef struct format_cmd_args_t {
-    char     *img_path;
-    MKFS_PARM mkfs_parm;
-} format_cmd_args_t;
-
-typedef struct mount_cmd_args_t {
-    char *img_path;
-    char *driver_number;
-} mount_cmd_args_t;
-
 // 命令执行函数声明
 int cmd_do_help(cmd_args_t);
 int cmd_do_version(cmd_args_t);
@@ -71,6 +55,8 @@ int shell_do_pwd(int argc, char **argv);
 
 int shell_do_read(int argc, char **argv);
 int shell_do_write(int argc, char **argv);
+int shell_do_head(int argc, char **argv);
+int shell_do_truncate(int argc, char **argv);
 
 int shell_do_touch(int argc, char **argv);
 int shell_do_mv(int argc, char **argv);
